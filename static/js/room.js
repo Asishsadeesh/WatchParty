@@ -144,6 +144,29 @@ function applyRoomState(data) {
     if (deleteForm) deleteForm.style.display = IS_HOST ? 'inline-block' : 'none';
     const host = data.participants?.[String(data.host_id)];
     if (host) document.getElementById('host-name').textContent = host.username;
+
+    // Update lock badge and host room controls
+    if (data.is_locked !== undefined) {
+        ROOM_IS_LOCKED = Boolean(data.is_locked);
+        const lockBadge = document.getElementById('lock-badge');
+        const lockText = document.getElementById('lock-status-text');
+        if (lockBadge) {
+            lockBadge.style.display = 'inline-block';
+            if (ROOM_IS_LOCKED) {
+                lockBadge.className = 'badge lock-badge';
+                if (lockText) lockText.textContent = 'Locked';
+            } else {
+                lockBadge.className = 'badge unlock-badge';
+                if (lockText) lockText.textContent = 'Unlocked';
+            }
+        }
+        const btnLock = document.getElementById('btn-lock-room');
+        const btnUnlock = document.getElementById('btn-unlock-room');
+        if (btnLock) btnLock.style.display = ROOM_IS_LOCKED ? 'none' : 'inline-flex';
+        if (btnUnlock) btnUnlock.style.display = ROOM_IS_LOCKED ? 'inline-flex' : 'none';
+    }
+    const hostControls = document.getElementById('host-room-controls');
+    if (hostControls) hostControls.style.display = IS_HOST ? 'flex' : 'none';
     const media = data.media || { type: 'youtube', url: '' };
     if (media.type !== currentMediaType || media.url !== currentMediaUrl) {
         currentMediaType = media.type;
@@ -560,5 +583,34 @@ async function processRangeQueue(requestedChunks) {
         } finally {
             isUploadingChunk = false;
         }
+    }
+}
+
+// ---- Room Lock / Unlock / Regenerate Secret ----
+async function toggleRoomLock() {
+    const endpoint = ROOM_IS_LOCKED ? '/unlock' : '/lock';
+    try {
+        const data = await api(endpoint, { method: 'POST', body: '{}' });
+        applyRoomState(data);
+    } catch (err) {
+        setPlayerStatus(err.message || 'Failed to toggle room lock.');
+    }
+}
+
+async function regenerateSecret() {
+    if (!confirm('Regenerate join code? Previous codes will stop working.')) return;
+    try {
+        const data = await api('/regenerate-secret', { method: 'POST', body: '{}' });
+        applyRoomState(data);
+        if (data.new_join_secret) {
+            const banner = document.getElementById('regen-secret-banner');
+            const codeEl = document.getElementById('regen-secret-value');
+            if (banner && codeEl) {
+                codeEl.textContent = data.new_join_secret;
+                banner.style.display = 'flex';
+            }
+        }
+    } catch (err) {
+        setPlayerStatus(err.message || 'Failed to regenerate secret.');
     }
 }

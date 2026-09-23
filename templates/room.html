@@ -11,6 +11,14 @@
             <div class="room-meta">
                 <span class="badge host-badge"><i class="fa-solid fa-crown"></i> Host: <span id="host-name">{{ room.host.username }}</span></span>
                 <span class="badge room-id">Room ID: {{ room.id }}</span>
+                {% if room.is_private %}
+                <span class="badge privacy-badge" id="privacy-badge"><i class="fa-solid fa-lock"></i> Private</span>
+                {% else %}
+                <span class="badge" id="privacy-badge"><i class="fa-solid fa-globe"></i> Public</span>
+                {% endif %}
+                <span class="badge" id="lock-badge" style="display: none;">
+                    <i class="fa-solid fa-ban"></i> <span id="lock-status-text">Unlocked</span>
+                </span>
                 <form id="delete-room-form" method="POST" action="{{ url_for('delete_room', room_id=room.id) }}"
                     style="display: {{ 'inline-block' if is_host else 'none' }}; margin-left: 10px;">
                     <button type="submit" class="badge"
@@ -19,6 +27,70 @@
                     </button>
                 </form>
             </div>
+        </div>
+
+        <!-- ===== JOIN SECRET BANNER (host only, shown once after creation) ===== -->
+        {% if join_secret %}
+        <div class="join-secret-banner glass-panel" id="join-secret-banner">
+            <div class="secret-banner-content">
+                <i class="fa-solid fa-key" style="color: var(--accent); font-size: 1.2rem;"></i>
+                <div>
+                    <strong>Your room's join code:</strong>
+                    <div class="secret-display">
+                        <code id="join-secret-value">{{ join_secret }}</code>
+                        <button class="btn-copy" onclick="copySecret()" title="Copy to clipboard">
+                            <i class="fa-solid fa-copy"></i>
+                        </button>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 4px;">
+                        Share this code with people you want to invite. It won't be shown again.
+                    </p>
+                </div>
+            </div>
+            <button class="btn-dismiss" onclick="document.getElementById('join-secret-banner').style.display='none'">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        {% endif %}
+
+        <!-- ===== HOST ROOM CONTROLS (lock/unlock/regenerate) ===== -->
+        <div class="host-room-controls glass-panel" id="host-room-controls" 
+             style="display: {{ 'flex' if is_host else 'none' }};">
+            <div class="control-group">
+                <button id="btn-lock-room" class="btn btn-control btn-lock" onclick="toggleRoomLock()">
+                    <i class="fa-solid fa-lock"></i> Lock Room
+                </button>
+                <button id="btn-unlock-room" class="btn btn-control btn-unlock" onclick="toggleRoomLock()" style="display: none;">
+                    <i class="fa-solid fa-lock-open"></i> Unlock Room
+                </button>
+                {% if room.is_private %}
+                <button id="btn-regenerate-secret" class="btn btn-control btn-regen" onclick="regenerateSecret()">
+                    <i class="fa-solid fa-rotate"></i> Regenerate Join Code
+                </button>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- ===== REGENERATED SECRET DISPLAY ===== -->
+        <div class="join-secret-banner glass-panel" id="regen-secret-banner" style="display: none;">
+            <div class="secret-banner-content">
+                <i class="fa-solid fa-key" style="color: var(--success); font-size: 1.2rem;"></i>
+                <div>
+                    <strong>New join code generated:</strong>
+                    <div class="secret-display">
+                        <code id="regen-secret-value"></code>
+                        <button class="btn-copy" onclick="copyRegenSecret()" title="Copy to clipboard">
+                            <i class="fa-solid fa-copy"></i>
+                        </button>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 4px;">
+                        Previous codes are now invalid. Share this new code with future members.
+                    </p>
+                </div>
+            </div>
+            <button class="btn-dismiss" onclick="document.getElementById('regen-secret-banner').style.display='none'">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
         </div>
 
         <div class="player-container glass-panel">
@@ -141,11 +213,28 @@
 <script>
     const ROOM_ID = "{{ room.id }}";
     let IS_HOST = {{ 'true' if is_host else 'false' }};
+    const ROOM_IS_PRIVATE = {{ 'true' if room.is_private else 'false' }};
+    let ROOM_IS_LOCKED = {{ 'true' if room.is_locked else 'false' }};
+
+    function copySecret() {
+        const val = document.getElementById('join-secret-value')?.textContent;
+        if (val) navigator.clipboard.writeText(val).then(() => {
+            const btn = document.querySelector('#join-secret-banner .btn-copy');
+            if (btn) { btn.innerHTML = '<i class="fa-solid fa-check"></i>'; setTimeout(() => btn.innerHTML = '<i class="fa-solid fa-copy"></i>', 1500); }
+        });
+    }
+    function copyRegenSecret() {
+        const val = document.getElementById('regen-secret-value')?.textContent;
+        if (val) navigator.clipboard.writeText(val).then(() => {
+            const btn = document.querySelector('#regen-secret-banner .btn-copy');
+            if (btn) { btn.innerHTML = '<i class="fa-solid fa-check"></i>'; setTimeout(() => btn.innerHTML = '<i class="fa-solid fa-copy"></i>', 1500); }
+        });
+    }
 </script>
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/room.js') }}?v=22"></script>
+<script src="{{ url_for('static', filename='js/room.js') }}?v=23"></script>
 <script src="https://www.youtube.com/iframe_api" onerror="window.YT_API_LOAD_FAILED = true; window.dispatchEvent(new Event('youtube-api-load-error'));"></script>
 <script src="https://unpkg.com/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
 <script src="https://unpkg.com/hls.js@1.4.12/dist/hls.min.js"></script>

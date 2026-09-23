@@ -18,6 +18,14 @@ class Room(db.Model):
     current_media_type = db.Column(db.String(20), default='youtube') # 'youtube', 'movie'
     current_media_url = db.Column(db.String(500), nullable=True) # YT ID or magnet link
     
-    last_empty_at = db.Column(db.DateTime, nullable=True)
+    # Room lifecycle — tracks last meaningful activity for auto-expiration
+    last_activity = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Privacy — private rooms require a join secret to enter
+    is_private = db.Column(db.Boolean, default=False)
+    join_secret_hash = db.Column(db.String(256), nullable=True)
+    
+    # Locking — host can lock the room to prevent new members
+    is_locked = db.Column(db.Boolean, default=False)
     
     host = db.relationship('User', backref=db.backref('hosted_rooms', lazy=True))

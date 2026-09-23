@@ -1,6 +1,6 @@
-from flask import request
+from flask import request, session
 from flask_socketio import emit, join_room, leave_room
-from app import socketio
+from app import socketio, _touch_activity
 from models import db, Room
 from datetime import datetime
 
@@ -40,14 +40,13 @@ def handle_user_leave(sid):
     emit('user_left', {'username': username, 'participants': participants}, to=room_id)
     
     if not participants:
-        # Room is empty — mark it for cleanup
+        # Room is empty — update last_activity so cleanup timer can begin
         try:
             room = db.session.get(Room, int(room_id))
             if room:
-                room.last_empty_at = datetime.utcnow()
-                db.session.commit()
+                _touch_activity(room)
         except Exception as e:
-            print(f"Error marking room empty: {e}")
+            print(f"Error updating activity on room empty: {e}")
     elif was_host:
         # Promote the first remaining participant to host
         new_host_id = list(participants.keys())[0]
@@ -76,6 +75,25 @@ def on_join(data):
         user_id = str(data['user_id'])  # ALWAYS string
         is_host = bool(data.get('is_host', False))
         
+        # ---- Server-side join authentication ----
+        room = db.session.get(Room, int(room_id))
+        if not room:
+            emit('join_error', {'error': 'room_not_found'}, to=request.sid)
+            return
+        
+        # Check if room is locked (existing members can reconnect)
+        if room.is_locked:
+            room_state = room_states.get(room_id, {})
+            if user_id not in room_state.get('participants', {}):
+                emit('join_error', {'error': 'room_locked', 'message': 'This room is currently locked.'}, to=request.sid)
+                return
+        
+        # Check private room authentication via Flask session
+        if room.is_private and str(room.host_id) != user_id:
+            if not session.get(f'room_{room_id}_auth'):
+                emit('join_error', {'error': 'invalid_join_code', 'message': 'Authentication required for this private room.'}, to=request.sid)
+                return
+        
         join_room(room_id)
         
         if room_id not in room_states:
@@ -91,10 +109,8 @@ def on_join(data):
         if not participants:
             is_host = True
             try:
-                room = db.session.get(Room, int(room_id))
                 if room:
                     room.host_id = int(user_id)
-                    room.last_empty_at = None
                     db.session.commit()
             except Exception as e:
                 print(f"Error setting host: {e}")
@@ -112,11 +128,13 @@ def on_join(data):
         
         active_sockets[user_id] = request.sid
         
+        # Update activity on join
+        _touch_activity(room)
+        
         # Determine current host_id for this room
         current_host_id = user_id if is_host else None
         if not current_host_id:
             try:
-                room = db.session.get(Room, int(room_id))
                 if room:
                     current_host_id = str(room.host_id)
             except Exception as e:
@@ -163,6 +181,14 @@ def on_sync(data):
         if participant and participant['has_seek_access']:
             room_states[room_id]['state'] = data['state']
             emit('sync_state', data['state'], to=room_id, include_self=False)
+            
+            # Touch activity for intentional sync (play/pause/seek)
+            try:
+                room = db.session.get(Room, int(room_id))
+                if room:
+                    _touch_activity(room)
+            except Exception:
+                pass
 
 @socketio.on('grant_access')
 def on_grant_access(data):
@@ -191,5 +217,13 @@ def on_change_media(data):
         room_states[room_id]['media'] = data['media']
         print(f"[change_media] Broadcasting media_change: {data['media']}")
         emit('media_change', data['media'], to=room_id)
+        
+        # Touch activity on media change
+        try:
+            room = db.session.get(Room, int(room_id))
+            if room:
+                _touch_activity(room)
+        except Exception:
+            pass
     else:
         print(f"[change_media] DENIED - participant not found or no seek access")

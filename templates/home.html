@@ -27,6 +27,16 @@
                 <div class="form-group">
                     <input type="text" name="name" placeholder="Room Name (e.g. Movie Night)" required autocomplete="off">
                 </div>
+                <div class="form-group privacy-toggle">
+                    <label class="toggle-label" for="is_private">
+                        <input type="checkbox" id="is_private" name="is_private">
+                        <span class="toggle-switch"></span>
+                        <span class="toggle-text">
+                            <i class="fa-solid fa-lock"></i> Private Room
+                        </span>
+                    </label>
+                    <p class="toggle-hint">Private rooms require a join code to enter.</p>
+                </div>
                 <button type="submit" class="btn btn-success">Create & Join</button>
             </form>
         </div>
@@ -38,10 +48,24 @@
                 {% for room in rooms %}
                 <li>
                     <div class="room-info">
-                        <span class="room-name">{{ room.name }}</span>
+                        <div class="room-name-row">
+                            <span class="room-name">{{ room.name }}</span>
+                            {% if room.is_private %}
+                            <span class="badge privacy-badge"><i class="fa-solid fa-lock"></i> Private</span>
+                            {% endif %}
+                            {% if room.is_locked %}
+                            <span class="badge lock-badge"><i class="fa-solid fa-ban"></i> Locked</span>
+                            {% endif %}
+                        </div>
                         <span class="room-host">Host: {{ room.host.username }}</span>
                     </div>
+                    {% if room.is_private %}
+                    <a href="{{ url_for('join_room_page', room_id=room.id) }}" class="btn btn-outline">
+                        <i class="fa-solid fa-key"></i> Join
+                    </a>
+                    {% else %}
                     <a href="{{ url_for('room', room_id=room.id) }}" class="btn btn-outline">Join</a>
+                    {% endif %}
                 </li>
                 {% endfor %}
             </ul>
@@ -50,6 +74,20 @@
             {% endif %}
         </div>
     </div>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-messages">
+        {% for category, message in messages %}
+        <div class="flash-msg flash-{{ category }}">
+            <i class="fa-solid {% if category == 'error' %}fa-circle-exclamation{% else %}fa-circle-info{% endif %}"></i>
+            {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
     <script>
         setInterval(() => {
             fetch(window.location.href)

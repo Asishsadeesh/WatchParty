@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Join {{ room.name }} - Watch Party{% endblock %}
+
+{% block content %}
+<div class="home-container">
+    <div class="hero-section">
+        <h1>Private Room</h1>
+        <p>This room requires a join code to enter.</p>
+    </div>
+
+    <div class="card login-card glass-panel join-card">
+        <div class="join-room-info">
+            <i class="fa-solid fa-lock" style="font-size: 2rem; color: var(--accent); margin-bottom: 12px;"></i>
+            <h2>{{ room.name }}</h2>
+            <span class="badge" style="margin-bottom: 16px;">Room #{{ room.id }}</span>
+        </div>
+
+        {% if error %}
+        <div class="join-error">
+            <i class="fa-solid fa-circle-exclamation"></i>
+            {% if error == 'invalid_join_code' %}
+                Invalid join code. Please check and try again.
+            {% else %}
+                {{ error }}
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('join_room_page', room_id=room.id) }}">
+            <div class="form-group">
+                <label for="join_secret" style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 6px; display: block;">
+                    Enter Join Code
+                </label>
+                <input type="text" id="join_secret" name="join_secret" 
+                       placeholder="Paste the join code here..." 
+                       required autocomplete="off"
+                       style="font-family: 'Courier New', monospace; letter-spacing: 1px;">
+            </div>
+            <button type="submit" class="btn btn-primary btn-large">
+                <i class="fa-solid fa-right-to-bracket"></i> Join Room
+            </button>
+        </form>
+
+        <a href="{{ url_for('home') }}" class="btn btn-outline" style="margin-top: 12px; display: inline-block;">
+            <i class="fa-solid fa-arrow-left"></i> Back to Home
+        </a>
+    </div>
+</div>
+{% endblock %}

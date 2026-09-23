@@ -2,11 +2,13 @@ import os
 import time
 import threading
 import re
+import secrets
 import requests as req
 # pyrefly: ignore [missing-import]
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_file, abort, Response
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_file, abort, Response, flash
 from flask_socketio import SocketIO
+from werkzeug.security import generate_password_hash, check_password_hash
 from models import db, User, Room
 
 app = Flask(__name__)
@@ -19,6 +21,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 CHUNK_SIZE = 1024 * 1024  # 1MB chunk size
 
+# Room expiration settings
+ROOM_INACTIVITY_TIMEOUT = timedelta(hours=1)
+CLEANUP_INTERVAL_SECONDS = 300  # 5 minutes
+
 db.init_app(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -27,6 +33,87 @@ range_states = {} # { room_id: { 'chunks': { chunk_id: bytes }, 'waiters': { chu
 
 # Import sockets after initializing socketio to avoid circular imports
 import sockets  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Activity tracking helper
+# ---------------------------------------------------------------------------
+def _touch_activity(room):
+    """Update last_activity on a room for meaningful events (not heartbeats)."""
+    try:
+        room.last_activity = datetime.utcnow()
+        db.session.commit()
+    except Exception as e:
+        print(f"[Activity] Error updating last_activity: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Background room cleanup
+# ---------------------------------------------------------------------------
+def _get_active_member_count(room_key):
+    """Count active WebSocket connections for a room using Socket.IO registry."""
+    count = 0
+    for sid, info in list(sockets.sid_to_user.items()):
+        if info.get('room_id') == room_key:
+            count += 1
+    return count
+
+
+def _cleanup_expired_rooms():
+    """Delete rooms that have been inactive for over 1 hour with no active members."""
+    with app.app_context():
+        try:
+            now = datetime.utcnow()
+            rooms = Room.query.all()
+            for room in rooms:
+                room_key = str(room.id)
+                active_count = _get_active_member_count(room_key)
+                
+                if active_count == 0:
+                    last_act = room.last_activity or room.created_at
+                    if (now - last_act) > ROOM_INACTIVITY_TIMEOUT:
+                        print(f"[Cleanup] Deleting expired room {room.id} ({room.name}) — "
+                              f"inactive since {last_act}")
+                        
+                        # Clean up in-memory state
+                        if room_key in sockets.room_states:
+                            del sockets.room_states[room_key]
+                        if room_key in range_states:
+                            del range_states[room_key]
+                        
+                        # Clean up any uploaded files for this room
+                        room_upload_dir = os.path.join(UPLOAD_FOLDER, room_key)
+                        if os.path.isdir(room_upload_dir):
+                            import shutil
+                            shutil.rmtree(room_upload_dir, ignore_errors=True)
+                        
+                        # Notify anyone still somehow connected
+                        try:
+                            socketio.emit('room_deleted', to=room_key)
+                        except Exception:
+                            pass
+                        
+                        try:
+                            db.session.delete(room)
+                            db.session.commit()
+                        except Exception as e:
+                            db.session.rollback()
+                            print(f"[Cleanup] Error deleting room {room.id}: {e}")
+        except Exception as e:
+            print(f"[Cleanup] Error during cleanup: {e}")
+
+
+def _start_cleanup_loop():
+    """Run the cleanup every CLEANUP_INTERVAL_SECONDS in a background thread."""
+    def loop():
+        while True:
+            time.sleep(CLEANUP_INTERVAL_SECONDS)
+            _cleanup_expired_rooms()
+    
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    print(f"[Cleanup] Background cleanup started (every {CLEANUP_INTERVAL_SECONDS}s)")
+
 
 @app.before_request
 def check_user():
@@ -39,18 +126,6 @@ def check_user():
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
-    
-    # Cleanup empty rooms older than 1 hour
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-    empty_rooms = Room.query.filter(Room.last_empty_at < one_hour_ago).all()
-    for room in empty_rooms:
-        db.session.delete(room)
-        db.session.commit()
-        if str(room.id) in sockets.room_states:
-            del sockets.room_states[str(room.id)]
-    if empty_rooms:
-        db.session.commit()
-
     if request.method == 'POST':
         username = request.form.get('username')
         if username:
@@ -81,18 +156,97 @@ def create_room():
         
     name = request.form.get('name')
     if name:
-        room = Room(name=name, host_id=session['user_id'])
+        is_private = request.form.get('is_private') == 'on'
+        
+        room = Room(
+            name=name,
+            host_id=session['user_id'],
+            is_private=is_private,
+            last_activity=datetime.utcnow()
+        )
+        
+        join_secret = None
+        if is_private:
+            # Generate a cryptographically secure join secret
+            join_secret = secrets.token_urlsafe(24)
+            room.join_secret_hash = generate_password_hash(join_secret)
+        
         db.session.add(room)
         db.session.commit()
+        
+        if is_private and join_secret:
+            # Store the plaintext secret in session so the host can see it once
+            session[f'room_{room.id}_secret'] = join_secret
+            # Mark host as authenticated for this room
+            session[f'room_{room.id}_auth'] = True
+        
         return redirect(url_for('room', room_id=room.id))
     return redirect(url_for('home'))
+
+
+@app.route('/join_room/<int:room_id>', methods=['GET', 'POST'])
+def join_room_page(room_id):
+    """Join page for private rooms — requires a valid join secret."""
+    if 'user_id' not in session:
+        return redirect(url_for('home'))
+    
+    room = Room.query.get(room_id)
+    if not room:
+        # Don't reveal whether the room exists
+        flash('Unable to join this room.', 'error')
+        return redirect(url_for('home'))
+    
+    # If room is locked, reject new joins
+    if room.is_locked:
+        flash('This room is currently locked.', 'error')
+        return redirect(url_for('home'))
+    
+    # If not private or already authenticated, go straight to room
+    if not room.is_private or session.get(f'room_{room_id}_auth'):
+        return redirect(url_for('room', room_id=room_id))
+    
+    error = None
+    if request.method == 'POST':
+        submitted_secret = request.form.get('join_secret', '').strip()
+        
+        if not submitted_secret or not room.join_secret_hash:
+            error = 'invalid_join_code'
+        elif check_password_hash(room.join_secret_hash, submitted_secret):
+            session[f'room_{room_id}_auth'] = True
+            _touch_activity(room)
+            return redirect(url_for('room', room_id=room_id))
+        else:
+            error = 'invalid_join_code'
+    
+    user = db.session.get(User, session['user_id'])
+    return render_template('join.html', room=room, user=user, error=error)
+
 
 @app.route('/room/<int:room_id>')
 def room(room_id):
     room = Room.query.get_or_404(room_id)
     user = db.session.get(User, session['user_id'])
     is_host = (room.host_id == user.id)
-    return render_template('room.html', room=room, user=user, is_host=is_host)
+    
+    # Enforce privacy: private rooms require authentication
+    if room.is_private and not is_host and not session.get(f'room_{room_id}_auth'):
+        return redirect(url_for('join_room_page', room_id=room_id))
+    
+    # Enforce lock: locked rooms reject new members (host always allowed)
+    if room.is_locked and not is_host:
+        # Check if user is already an active participant (allow reconnect)
+        room_key = str(room_id)
+        user_id = str(user.id)
+        state = sockets.room_states.get(room_key, {})
+        if user_id not in state.get('participants', {}):
+            flash('This room is currently locked. No new members can join.', 'error')
+            return redirect(url_for('home'))
+    
+    # Retrieve the join secret from session (only host sees it, only once)
+    join_secret = session.pop(f'room_{room_id}_secret', None)
+    
+    return render_template('room.html', room=room, user=user, is_host=is_host,
+                           join_secret=join_secret)
 
 @app.route('/delete_room/<int:room_id>', methods=['POST'])
 def delete_room(room_id):
@@ -106,6 +260,8 @@ def delete_room(room_id):
         
         if str(room_id) in sockets.room_states:
             del sockets.room_states[str(room_id)]
+        if str(room_id) in range_states:
+            del range_states[str(room_id)]
         socketio.emit('room_deleted', to=str(room_id))
             
     return redirect(url_for('home'))
@@ -230,6 +386,9 @@ def _get_room_state(room_id):
         if now - participant.get('last_seen', now) < 8
     }
 
+    # Track whether this is a new join (participant wasn't already present)
+    is_new_join = user_id not in state['participants']
+
     participant = state['participants'].setdefault(user_id, {
         'username': username,
         'has_seek_access': str(room.host_id) == user_id
@@ -242,6 +401,11 @@ def _get_room_state(room_id):
     _elect_active_host(room, state)
     if state.get('controller_id') not in state['participants']:
         state['controller_id'] = str(room.host_id) if str(room.host_id) in state['participants'] else None
+
+    # Touch activity on new joins
+    if is_new_join:
+        _touch_activity(room)
+
     return room, state, user_id
 
 
@@ -290,7 +454,10 @@ def _room_payload(room, state, user_id):
         'is_host': str(room.host_id) == user_id,
         'controller_id': state.get('controller_id'),
         'revision': state['revision'],
-        'requested_chunks': list(range_states.get(str(room.id), {'requested': set()})['requested'])
+        'requested_chunks': list(range_states.get(str(room.id), {'requested': set()})['requested']),
+        # Room privacy/lifecycle state (never includes secrets)
+        'is_private': room.is_private,
+        'is_locked': room.is_locked,
     }
 
 
@@ -306,6 +473,7 @@ def leave_room_presence(room_id):
     state['participants'].pop(user_id, None)
     _elect_active_host(room, state)
     state['revision'] += 1
+    _touch_activity(room)
     return jsonify({'ok': True})
 
 
@@ -332,6 +500,7 @@ def update_room_media(room_id):
     state['state'] = {'status': 'paused', 'time': 0, 'updated_at': time.time()}
     state['controller_id'] = user_id
     state['revision'] += 1
+    _touch_activity(room)
     return jsonify(_room_payload(room, state, user_id))
 
 
@@ -356,6 +525,7 @@ def range_init(room_id):
     state['media'] = {'type': 'range', 'url': 'range', 'size': size, 'contentType': content_type}
     state['state'] = {'status': 'paused', 'time': 0, 'updated_at': time.time()}
     state['revision'] += 1
+    _touch_activity(room)
     return jsonify({'ok': True})
 
 @app.route('/api/rooms/<int:room_id>/media/range-chunk/<chunk_id>', methods=['POST'])
@@ -467,6 +637,11 @@ def update_room_sync(room_id):
     state['state'] = {'status': playback['status'], 'time': playback_time, 'updated_at': time.time()}
     state['controller_id'] = user_id
     state['revision'] += 1
+    
+    # Touch activity on intentional play/pause/seek (NOT heartbeats)
+    if not is_heartbeat:
+        _touch_activity(room)
+    
     return jsonify({'ok': True, 'revision': state['revision'], 'controller_id': user_id})
 
 
@@ -485,9 +660,65 @@ def update_room_access(room_id):
     if not state['participants'][target_id]['has_seek_access'] and state.get('controller_id') == target_id:
         state['controller_id'] = user_id
     state['revision'] += 1
+    _touch_activity(room)
     return jsonify(_room_payload(room, state, user_id))
+
+
+# ---------------------------------------------------------------------------
+# Room lock / unlock / regenerate-secret endpoints
+# ---------------------------------------------------------------------------
+@app.route('/api/rooms/<int:room_id>/lock', methods=['POST'])
+def lock_room(room_id):
+    """Host locks the room — no new members can join."""
+    room, state, user_id = _get_room_state(room_id)
+    if str(room.host_id) != user_id:
+        return jsonify({'error': 'Only the host can lock the room.'}), 403
+    
+    room.is_locked = True
+    db.session.commit()
+    state['revision'] += 1
+    _touch_activity(room)
+    return jsonify(_room_payload(room, state, user_id))
+
+
+@app.route('/api/rooms/<int:room_id>/unlock', methods=['POST'])
+def unlock_room(room_id):
+    """Host unlocks the room — new members can join again."""
+    room, state, user_id = _get_room_state(room_id)
+    if str(room.host_id) != user_id:
+        return jsonify({'error': 'Only the host can unlock the room.'}), 403
+    
+    room.is_locked = False
+    db.session.commit()
+    state['revision'] += 1
+    _touch_activity(room)
+    return jsonify(_room_payload(room, state, user_id))
+
+
+@app.route('/api/rooms/<int:room_id>/regenerate-secret', methods=['POST'])
+def regenerate_secret(room_id):
+    """Host regenerates the private room join secret. Existing members stay connected."""
+    room, state, user_id = _get_room_state(room_id)
+    if str(room.host_id) != user_id:
+        return jsonify({'error': 'Only the host can regenerate the join secret.'}), 403
+    
+    if not room.is_private:
+        return jsonify({'error': 'Room is not private.'}), 400
+    
+    new_secret = secrets.token_urlsafe(24)
+    room.join_secret_hash = generate_password_hash(new_secret)
+    db.session.commit()
+    state['revision'] += 1
+    _touch_activity(room)
+    
+    payload = _room_payload(room, state, user_id)
+    # Return the new secret to the host ONLY in this response
+    payload['new_join_secret'] = new_secret
+    return jsonify(payload)
+
 
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+    _start_cleanup_loop()
     socketio.run(app, debug=True, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
