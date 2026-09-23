@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}{{ room.name }} - Watch Party{% endblock %}
+
+{% block content %}
+<div class="room-layout">
+    <!-- ===== MAIN CONTENT ===== -->
+    <div class="main-content">
+        <div class="room-header glass-panel">
+            <h2 id="room-title">{{ room.name }}</h2>
+            <div class="room-meta">
+                <span class="badge host-badge"><i class="fa-solid fa-crown"></i> Host: <span id="host-name">{{ room.host.username }}</span></span>
+                <span class="badge room-id">Room ID: {{ room.id }}</span>
+                <form id="delete-room-form" method="POST" action="{{ url_for('delete_room', room_id=room.id) }}"
+                    style="display: {{ 'inline-block' if is_host else 'none' }}; margin-left: 10px;">
+                    <button type="submit" class="badge"
+                        style="border: none; cursor: pointer; background: rgba(239, 68, 68, 0.2); color: #ef4444;">
+                        <i class="fa-solid fa-trash"></i> Delete
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <div class="player-container glass-panel">
+            <!-- ===== HOST MEDIA CONTROLS ===== -->
+            <div class="media-controls" id="host-media-controls" style="display: {{ 'block' if is_host else 'none' }};">
+                <div class="tab-buttons">
+                    <button class="tab-btn active" data-target="search-panel" id="tab-search">
+                        <i class="fa-solid fa-magnifying-glass"></i> Search YouTube
+                    </button>
+                    <button class="tab-btn" data-target="paste-url-panel" id="tab-paste-url">
+                        <i class="fa-solid fa-link"></i> Paste URL
+                    </button>
+                    <button class="tab-btn" data-target="local-panel" id="tab-local">
+                        <i class="fa-solid fa-film"></i> Local File
+                    </button>
+                </div>
+
+                <!-- Search Panel -->
+                <div class="input-section active search-panel" id="search-panel">
+                    <div class="search-bar-row">
+                        <input type="text" id="yt-search-input" placeholder="Search YouTube videos..." autocomplete="off">
+                        <button id="yt-search-btn" class="btn btn-primary">
+                            <i class="fa-solid fa-magnifying-glass"></i> Search
+                        </button>
+                    </div>
+                    <div id="search-status" class="search-status" style="display:none;">
+                        <i class="fa-solid fa-circle-notch fa-spin"></i> Searching...
+                    </div>
+                    <div id="search-results" class="search-results-grid"></div>
+                </div>
+
+                <!-- Smart URL paste panel — handles YouTube URLs and direct video URLs -->
+                <div class="input-section" id="paste-url-panel" style="display: none;">
+                    <input type="text" id="paste-url-input"
+                        placeholder="Paste YouTube URL, video ID, or direct .mp4/.webm link..."
+                        autocomplete="off">
+                    <button id="load-paste-url-btn" class="btn btn-primary">
+                        <i class="fa-solid fa-play"></i> Load
+                    </button>
+                </div>
+
+                <!-- Local File Panel -->
+                <div class="input-section" id="local-panel" style="display: none;">
+                    <input type="file" id="local-file" accept="video/*">
+                    <button type="button" id="load-local-btn" class="btn btn-primary">
+                        <i class="fa-solid fa-upload"></i> Upload &amp; Stream File
+                    </button>
+                </div>
+            </div>
+
+            <!-- Guest Prompt (while waiting for host to pick something) -->
+            <div id="waiting-prompt" class="overlay-prompt"
+                style="display: {{ 'flex' if not is_host else 'none' }};">
+                <div class="waiting-content">
+                    <i class="fa-solid fa-hourglass-half fa-2x" style="color:var(--accent);margin-bottom:12px;"></i>
+                    <h3>Waiting for host...</h3>
+                    <p>The host is selecting a video. It will appear here automatically.</p>
+                </div>
+            </div>
+
+            <!-- Member Choice Prompt (when host has media, member picks how to watch) -->
+            <div id="member-media-choice" class="overlay-prompt" style="display: none;">
+                <div class="waiting-content">
+                    <i class="fa-solid fa-film fa-2x" style="color:var(--accent);margin-bottom:12px;"></i>
+                    <h3>Host is streaming a video</h3>
+                    <p>How would you like to watch?</p>
+                    <div style="display:flex; gap:12px; margin-top:16px; flex-wrap:wrap; justify-content:center;">
+                        <button id="btn-watch-host" class="btn btn-primary">
+                            <i class="fa-solid fa-satellite-dish"></i> Watch Host Stream
+                        </button>
+                        <button id="btn-choose-local" class="btn btn-primary" style="background:var(--glass-bg);">
+                            <i class="fa-solid fa-folder-open"></i> Choose File From Device
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <!-- Hidden file input for member local file selection -->
+            <input type="file" id="member-local-file" accept="video/*" style="display:none;">
+
+
+            <!-- Video Players -->
+            <div id="player-wrapper">
+                <div id="yt-container"><div id="yt-player"></div></div>
+                <video id="html5-player" controls style="display: none; width: 100%; height: 100%; object-fit: contain;"></video>
+                <div id="player-status" class="player-status" role="status" aria-live="polite" style="display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== SIDE PANEL ===== -->
+    <div class="side-panel glass-panel">
+        <div class="participants-header">
+            <h3><i class="fa-solid fa-users"></i> Participants</h3>
+            <span id="participant-count" class="badge">0</span>
+        </div>
+        <ul id="participant-list" class="participant-list">
+            <!-- Populated via JS -->
+        </ul>
+    </div>
+</div>
+
+<!-- Search result card template (cloned by JS) -->
+<template id="search-result-tpl">
+    <div class="search-card">
+        <div class="search-thumb">
+            <img src="" alt="" loading="lazy">
+            <span class="thumb-duration"></span>
+        </div>
+        <div class="search-info">
+            <p class="search-title"></p>
+            <span class="search-channel"></span>
+            <span class="search-views"></span>
+        </div>
+        <button class="btn-play-result btn btn-primary">
+            <i class="fa-solid fa-play"></i> Play
+        </button>
+    </div>
+</template>
+
+<script>
+    const ROOM_ID = "{{ room.id }}";
+    let IS_HOST = {{ 'true' if is_host else 'false' }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/room.js') }}?v=22"></script>
+<script src="https://www.youtube.com/iframe_api" onerror="window.YT_API_LOAD_FAILED = true; window.dispatchEvent(new Event('youtube-api-load-error'));"></script>
+<script src="https://unpkg.com/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<script src="https://unpkg.com/hls.js@1.4.12/dist/hls.min.js"></script>
+{% endblock %}

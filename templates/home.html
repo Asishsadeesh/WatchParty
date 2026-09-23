@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Home - Watch Party{% endblock %}
+
+{% block content %}
+<div class="home-container">
+    <div class="hero-section">
+        <h1>Sync. Watch. Together.</h1>
+        <p>Create a room, invite friends, and watch movies or YouTube videos in perfect sync.</p>
+    </div>
+
+    {% if not user %}
+    <div class="card login-card glass-panel">
+        <h2>Join the Party</h2>
+        <form method="POST" action="{{ url_for('home') }}">
+            <div class="form-group">
+                <input type="text" name="username" placeholder="Choose a username..." required autocomplete="off">
+            </div>
+            <button type="submit" class="btn btn-primary btn-large">Enter</button>
+        </form>
+    </div>
+    {% else %}
+    <div class="dashboard grid-2">
+        <div class="card glass-panel">
+            <h2><i class="fa-solid fa-plus"></i> Create Room</h2>
+            <form method="POST" action="{{ url_for('create_room') }}">
+                <div class="form-group">
+                    <input type="text" name="name" placeholder="Room Name (e.g. Movie Night)" required autocomplete="off">
+                </div>
+                <button type="submit" class="btn btn-success">Create & Join</button>
+            </form>
+        </div>
+
+        <div id="active-rooms" class="card glass-panel">
+            <h2><i class="fa-solid fa-door-open"></i> Active Rooms</h2>
+            {% if rooms %}
+            <ul class="room-list">
+                {% for room in rooms %}
+                <li>
+                    <div class="room-info">
+                        <span class="room-name">{{ room.name }}</span>
+                        <span class="room-host">Host: {{ room.host.username }}</span>
+                    </div>
+                    <a href="{{ url_for('room', room_id=room.id) }}" class="btn btn-outline">Join</a>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty-state">No active rooms yet. Create one!</p>
+            {% endif %}
+        </div>
+    </div>
+    <script>
+        setInterval(() => {
+            fetch(window.location.href)
+                .then(res => res.text())
+                .then(html => {
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    const newRooms = doc.getElementById('active-rooms');
+                    const oldRooms = document.getElementById('active-rooms');
+                    if (newRooms && oldRooms && newRooms.innerHTML !== oldRooms.innerHTML) {
+                        oldRooms.innerHTML = newRooms.innerHTML;
+                    }
+                });
+        }, 3000);
+    </script>
+    {% endif %}
+</div>
+{% endblock %}
